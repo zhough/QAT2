@@ -1,3 +1,5 @@
 # 忽略data文件夹及其内容
 data/
 data/*
+bak/
+bak/*

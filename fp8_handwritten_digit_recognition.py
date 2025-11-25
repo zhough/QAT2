@@ -1,3 +1,4 @@
+from torch import relu
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -6,23 +7,20 @@ from torchvision import datasets, transforms
 import numpy as np
 import os
 
-# 检查是否有可用的GPU
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"使用设备: {device}")
 
-# 定义用于FP8的工具函数
-class FP8Converter:
-    @staticmethod
-    def to_int8(tensor):
-        # PyTorch中没有直接的FP8支持，这里使用自定义的FP8模拟
-        # 使用INT8模拟FP8，但保持其动态范围
-        # 确保我们使用的是最大绝对值得比例因子
-        max_val = torch.max(torch.abs(tensor)).item()
-        scale = 127.0 / max(max_val, 1e-10)  # 防止除以零
-        
-        # 量化到int8范围
-        int8_tensor = torch.round(tensor * scale).clamp(-128, 127).to(torch.int8)
-        return int8_tensor, scale
+OUT_CHANNEL = 16
+def to_int8(tensor):
+    # PyTorch中没有直接的FP8支持，这里使用自定义的FP8模拟
+    # 使用INT8模拟FP8，但保持其动态范围
+    # 确保我们使用的是最大绝对值得比例因子
+    max_val = torch.max(torch.abs(tensor)).item()
+    scale = 127.0 / max(max_val, 1e-10)  # 防止除以零
+    
+    # 量化到int8范围
+    int8_tensor = torch.round(tensor * scale).clamp(-128, 127).to(torch.int8)
+    return int8_tensor, scale
     
 
 
@@ -30,14 +28,11 @@ class FP8Converter:
 class FP8HandwrittenDigitModel(nn.Module):
     def __init__(self):
         super(FP8HandwrittenDigitModel, self).__init__()
-        # 卷积层: conv(1,32,3,2,0) - 1个输入通道，32个输出通道，3x3卷积核，步长2，无填充
-        self.conv1 = nn.Conv2d(1, 32, kernel_size=3, stride=2, padding=0)
+        self.conv1 = nn.Conv2d(1, OUT_CHANNEL, kernel_size=3, stride=2, padding=0)
         # 池化层: MaxPool2d
         self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
-        # 全连接层: 计算卷积和池化后的输出大小并连接到10个输出类别
-        # 输入图像大小为28x28，经过conv1后变为13x13，再经过maxpool后变为6x6
-        # 所以全连接层的输入特征数是 32 * 6 * 6 = 1152
-        self.input_size = 32 * 6 * 6
+
+        self.input_size = OUT_CHANNEL * 6 * 6
         self.fc1 = nn.Linear(self.input_size, 10)
 
     def relu3(self,x):
@@ -68,7 +63,7 @@ class FP8HandwrittenDigitModel(nn.Module):
         
         for key, tensor in state_dict.items():
             # 将权重和偏置转换为INT8格式
-            int8_tensor, scale = FP8Converter.to_int8(tensor)
+            int8_tensor, scale = to_int8(tensor)
             # 分别保存数据和缩放因子
             save_dict[f"{key}_data"] = int8_tensor.cpu().numpy()
             save_dict[f"{key}_scale"] = scale
@@ -85,7 +80,6 @@ class FP8ManualInference:
         self.load_weights(model_weights_path)
     
     def load_weights(self, file_path):
-        """加载FP8格式的权重和偏置"""
         npzfile = np.load(file_path)
         self.weights = {}
         
@@ -105,7 +99,7 @@ class FP8ManualInference:
     
 
     
-    def infer(self, input_image,infer_type=np.int16,output_type=np.int32):
+    def infer(self, input_image,infer_type=np.int16,output_type=np.int16):
         """执行整数运算"""
         # 确保输入是numpy数组且维度正确
         if len(input_image.shape) == 2:
@@ -127,10 +121,10 @@ class FP8ManualInference:
         # 由于权重已经在保存时进行了量化，我们直接使用这些整数值
         
         # 输出特征图尺寸: 13x13
-        conv_output = np.zeros((1, 32, 13, 13), dtype=infer_type)
+        conv_output = np.zeros((1, OUT_CHANNEL, 13, 13), dtype=infer_type)
         
         # 执行卷积操作 - 简化且直接
-        for out_channel in range(32):
+        for out_channel in range(OUT_CHANNEL):
             for i in range(13):
                 for j in range(13):
                     conv_sum = 0
@@ -158,16 +152,15 @@ class FP8ManualInference:
                     # 存储结果
                     conv_output[0, out_channel, i, j] = conv_sum
         print(f'conv_output最大值：{np.max(conv_output)}')
-        # 2. ReLU6激活函数
-        # 简化的ReLU6实现
-        #relu6_output = np.clip(conv_output, 0, 6 * 255 * 100)
-        relu6_output = np.clip(conv_output, 0, 64) 
+
+        relu6_output = np.clip(conv_output, 0, 1)
+        #print(f'relu6_output{relu6_output}') 
         print(f'relu6_output最大值：{np.max(relu6_output)}')
         # 3. 最大池化
         # 池化核: 2x2, 步长: 2 -> 输出: 6x6
-        pool_output = np.zeros((1, 32, 6, 6), dtype=infer_type)
+        pool_output = np.zeros((1, OUT_CHANNEL, 6, 6), dtype=infer_type)
         # 执行最大池化
-        for out_channel in range(32):
+        for out_channel in range(OUT_CHANNEL):
             for i in range(6):
                 for j in range(6):
                     max_val = -2**31 if infer_type == np.int32 else -2**15
@@ -305,27 +298,7 @@ def main(train=True,test_num=100):
     # 计算并显示准确率
     accuracy = correct / total if total > 0 else 0.0
     print(f"\n手动推理1的准确率: {accuracy:.2%} ({correct}/{total})")
-    #
-    # #推理2
-    # correct = 0
-    # total = 200
-    # print(f"\n验证{total}张测试图片的手动推理准确率:")
-    # for i in range(total):
-    #     # 获取测试图像和标签
-    #     image, label = infer_dataset2[i]
-    #     # 转换为numpy数组用于手动推理
-    #     image_np = image.numpy().squeeze()
-    #     # 进行手动FP8推理
-    #     predicted_label = fp8_inference.infer(image_np)
-    #     # 检查预测是否正确
-    #     is_correct = predicted_label == label
-    #     if is_correct:
-    #         correct += 1
-    #     # 显示结果
-    #     #print(f"测试图片 {i+1}/{total}: 真实标签={label}, 预测标签={predicted_label}, {'✓ 正确' if is_correct else '✗ 错误'}")
-    # # 计算并显示准确率
-    # accuracy = correct / total if total > 0 else 0.0
-    # print(f"\n手动推理2的准确率: {accuracy:.2%} ({correct}/{total})")
+
 
 
 def evaluate_model(model, test_loader):

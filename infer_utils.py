@@ -133,9 +133,19 @@ def load_weight_from_npz(file_path):
     data_keys = [key for key in npfiles.files if key.endswith('_data')]
     conv1_weight = npfiles['conv1.weight_data']
     conv1_bias = npfiles['conv1.bias_data']
-    fc1_weight = npfiles['fc1.weight_data']
-    fc1_bias = npfiles['fc1.bias_data']
-    return conv1_weight, conv1_bias, fc1_weight, fc1_bias
+    
+    # 检查是否有conv2层的权重
+    if 'conv2.weight_data' in npfiles and 'conv2.bias_data' in npfiles:
+        conv2_weight = npfiles['conv2.weight_data']
+        conv2_bias = npfiles['conv2.bias_data']
+        fc1_weight = npfiles['fc1.weight_data']
+        fc1_bias = npfiles['fc1.bias_data']
+        return conv1_weight, conv1_bias, conv2_weight, conv2_bias, fc1_weight, fc1_bias
+    else:
+        # 兼容旧版本的权重文件（只有一层卷积）
+        fc1_weight = npfiles['fc1.weight_data']
+        fc1_bias = npfiles['fc1.bias_data']
+        return conv1_weight, conv1_bias, fc1_weight, fc1_bias
 
 def read_mnist_images(file_path):
     with open(file_path, 'rb') as f:
@@ -162,7 +172,7 @@ def infer(input,conv1_weight,conv1_bias,fc1_weight,fc1_bias):
     # 卷积层
     conv_output = conv2d(input, conv1_weight, conv1_bias, stride=2, padding=0,dtype=np.int16)
     # 池化层
-    pool_output = pooling(conv_output,kernel_size=2,stride=2)
+    pool_output = pooling(conv_output,kernel_size=3,stride=3)
     # ReLU-K 激活函数
     reluk_output = reluk(pool_output,1,dtype=np.int16)
     # 展平特征图
@@ -172,22 +182,30 @@ def infer(input,conv1_weight,conv1_bias,fc1_weight,fc1_bias):
     return fc_output,np.argmax(fc_output)
 
 
-def eval(img_num):
+
+def eval(img_num,weight_file_path):
     correct = 0
     images = read_mnist_images('data/MNIST/raw/t10k-images-idx3-ubyte')
     labels = read_mnist_labels('data/MNIST/raw/t10k-labels-idx1-ubyte')
-    conv1_weight, conv1_bias, fc1_weight, fc1_bias = load_weight_from_npz('handwritten_digit_model_fp8.npz')
+    
+    weights = load_weight_from_npz(weight_file_path)
+    conv1_weight, conv1_bias, fc1_weight, fc1_bias = weights
+    #计算所有参数的个数
+    param_num = conv1_weight.size + conv1_bias.size + fc1_weight.size + fc1_bias.size
+    print(f'参数个数: {param_num}')
     for i in range(img_num):
+
         output, pred = infer(images[i][np.newaxis, ...], conv1_weight, conv1_bias, fc1_weight, fc1_bias)
+    
         if pred == labels[i]:
             correct += 1
-    return correct/img_num
+    return (correct/img_num)*100
 
 
 
 if __name__ == '__main__':
-    p = eval(100)
-    print(p)
+    p = eval(200,'weight2.npz')
+    print(f'准确率: {p:.2f}%')
 
 
 
